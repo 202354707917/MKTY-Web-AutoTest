@@ -1,0 +1,11 @@
+.venv/
+.selenium-cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+artifacts/
+*.log
+allure-results/
+allure-report/
+.env
+.env.*
