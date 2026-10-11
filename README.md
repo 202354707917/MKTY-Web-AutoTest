@@ -42,7 +42,7 @@
 │   └── screenshots/                  # 测试失败时保存的 PNG 截图
 ├── allure-results/                   # pytest 生成的 Allure 原始结果
 ├── allure-report/                    # Allure CLI 生成的静态 HTML 报告
-├── tools/allure/allure-2.46.1/       # 项目内 Allure CLI
+├── tools/allure/allure-2.46.1/       # 可选的项目内 Allure CLI
 ├── .venv/                            # 项目独立 Python 虚拟环境
 └── .selenium-cache/                  # Selenium Manager 的项目内缓存
 ```
@@ -56,7 +56,7 @@
 - Python 3.11，并使用项目根目录下的 `.venv`；
 - 已安装的 Chrome 浏览器；
 - Java，用于运行 Allure CLI；
-- 项目内的 `tools\allure\allure-2.46.1\bin\allure.bat`。
+- Allure CLI 2.46.1：项目内工具、`MKTY_ALLURE_CLI` 或 PATH 中的外部安装版本三者之一。
 
 在 PowerShell 中进入项目目录后激活虚拟环境：
 
@@ -65,6 +65,42 @@
 ```
 
 也可以始终直接调用 `.venv\Scripts\python.exe`，避免误用系统 Python。
+
+### Allure CLI 安装
+
+Allure CLI 不包含在 `allure-pytest` Python 依赖中。新电脑建议从 Allure 官方发布渠道获取固定版本 2.46.1：
+
+<https://github.com/allure-framework/allure2/releases>
+
+需要先确认 Java 可用：
+
+```powershell
+java -version
+```
+
+示例安装目录为：
+
+```text
+%LOCALAPPDATA%\Allure\2.46.1
+```
+
+在 PowerShell 中检查外部 CLI：
+
+```powershell
+$allureCli = Join-Path $env:LOCALAPPDATA "Allure\2.46.1\bin\allure.bat"
+& $allureCli --version
+```
+
+如果 CLI 不在 PATH 中，可以在当前 PowerShell 会话中指定完整路径：
+
+```powershell
+$env:MKTY_ALLURE_CLI = Join-Path $env:LOCALAPPDATA "Allure\2.46.1\bin\allure.bat"
+& $env:MKTY_ALLURE_CLI --version
+```
+
+`scripts\run_readonly_regression.ps1` 的查找顺序是：项目内 `tools\allure\allure-2.46.1\bin\allure.bat`、`MKTY_ALLURE_CLI`、PATH 中的 `allure.bat` 或 `allure`。找到后必须通过 `--version` 验证为 2.46.1；显式设置的 `MKTY_ALLURE_CLI` 路径无效时不会静默切换到其他版本。
+
+本项目尚未下载或核验官方发布包的 SHA-256，哈希值待实际获取发布包后再记录。
 
 ## 统一运行入口
 
@@ -127,7 +163,33 @@ $runId = Get-Date -Format "yyyyMMdd_HHmmss"
 $resultDir = ".\artifacts\allure-results-$runId"
 $reportDir = ".\artifacts\allure-report-$runId"
 python -m pytest -m ui --alluredir=$resultDir
-& ".\tools\allure\allure-2.46.1\bin\allure.bat" generate $resultDir --output $reportDir
+$projectAllureCli = ".\tools\allure\allure-2.46.1\bin\allure.bat"
+if (Test-Path -LiteralPath $projectAllureCli -PathType Leaf) {
+    $allureCli = (Resolve-Path -LiteralPath $projectAllureCli).Path
+}
+elseif (-not [string]::IsNullOrWhiteSpace($env:MKTY_ALLURE_CLI)) {
+    if (-not (Test-Path -LiteralPath $env:MKTY_ALLURE_CLI -PathType Leaf)) {
+        throw "MKTY_ALLURE_CLI must point to an existing allure.bat file."
+    }
+    $allureCli = (Resolve-Path -LiteralPath $env:MKTY_ALLURE_CLI).Path
+}
+else {
+    $allureCommand = Get-Command allure.bat -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -eq $allureCommand) {
+        $allureCommand = Get-Command allure -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+    }
+    if ($null -eq $allureCommand) {
+        throw "Allure CLI 2.46.1 was not found."
+    }
+    $allureCli = $allureCommand.Path
+    if ([string]::IsNullOrWhiteSpace($allureCli)) {
+        $allureCli = $allureCommand.Source
+    }
+}
+& $allureCli --version
+& $allureCli generate $resultDir --output $reportDir
 ```
 
 需要生成全部测试的结果时，将上面命令中的 `-m ui` 删除；需要只生成冒烟结果时改为 `-m smoke`。当前 `pytest.ini` 没有默认配置 `--alluredir`，因此必须显式传入结果目录。

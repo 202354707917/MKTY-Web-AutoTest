@@ -252,14 +252,82 @@ if ($resultValidationFailed) {
     exit 1
 }
 
-$allureCli = Join-Path $projectRoot "tools\allure\allure-2.46.1\bin\allure.bat"
-if (-not (Test-Path -LiteralPath $allureCli -PathType Leaf)) {
-    Report-ReadonlyFailure "Allure CLI was not found: $allureCli"
+$projectAllureCli = Join-Path $projectRoot "tools\allure\allure-2.46.1\bin\allure.bat"
+$allureCli = $null
+if (Test-Path -LiteralPath $projectAllureCli -PathType Leaf) {
+    $allureCli = (Resolve-Path -LiteralPath $projectAllureCli).Path
+}
+else {
+    $configuredAllureCli = [Environment]::GetEnvironmentVariable("MKTY_ALLURE_CLI", "Process")
+    if (-not [string]::IsNullOrWhiteSpace($configuredAllureCli)) {
+        $configuredAllureCli = $configuredAllureCli.Trim()
+        $configuredPathIsValid = $false
+        try {
+            $configuredPathIsValid =
+                (Test-Path -LiteralPath $configuredAllureCli -PathType Leaf -ErrorAction Stop) -and
+                ([IO.Path]::GetFileName($configuredAllureCli) -ieq "allure.bat")
+        }
+        catch {
+            $configuredPathIsValid = $false
+        }
+        if (-not $configuredPathIsValid) {
+            Report-ReadonlyFailure "MKTY_ALLURE_CLI must point to an existing allure.bat file: $configuredAllureCli"
+            if ($pytestExitCode -ne 0) {
+                exit $pytestExitCode
+            }
+            exit 1
+        }
+        $allureCli = (Resolve-Path -LiteralPath $configuredAllureCli).Path
+    }
+    else {
+        foreach ($commandName in @("allure.bat", "allure")) {
+            $pathCommand = Get-Command -Name $commandName -CommandType Application -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($null -ne $pathCommand) {
+                $allureCli = $pathCommand.Path
+                if ([string]::IsNullOrWhiteSpace($allureCli)) {
+                    $allureCli = $pathCommand.Source
+                }
+                break
+            }
+        }
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($allureCli)) {
+    Report-ReadonlyFailure "Allure CLI 2.46.1 was not found. Install the official Allure CLI or set MKTY_ALLURE_CLI to an existing allure.bat."
     if ($pytestExitCode -ne 0) {
         exit $pytestExitCode
     }
     exit 1
 }
+
+$allureVersionOutput = @()
+$allureVersionExitCode = 1
+$allureVersionStarted = $false
+try {
+    $allureVersionOutput = @(& $allureCli --version 2>&1)
+    $allureVersionExitCode = $LASTEXITCODE
+    $allureVersionStarted = $true
+}
+catch {
+    Report-ReadonlyFailure "Allure CLI version check could not be started: $($_.Exception.Message)"
+}
+
+$allureVersionText = (($allureVersionOutput | ForEach-Object { [string]$_ }) -join "`n").Trim()
+if (-not $allureVersionStarted -or
+    $allureVersionExitCode -ne 0 -or
+    $allureVersionText -notmatch '(?<!\d)2\.46\.1(?!\d)') {
+    if ([string]::IsNullOrWhiteSpace($allureVersionText)) {
+        $allureVersionText = "<no version output>"
+    }
+    Report-ReadonlyFailure "Unsupported Allure CLI version. Expected 2.46.1, received: $allureVersionText"
+    if ($pytestExitCode -ne 0) {
+        exit $pytestExitCode
+    }
+    exit 1
+}
+Write-Host "Using Allure CLI 2.46.1: $allureCli"
 
 $allureGenerateExitCode = 1
 $allureGenerateStarted = $false
