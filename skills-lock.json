@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "selenium-skill": {
+      "source": "LambdaTest/agent-skills",
+      "sourceType": "github",
+      "computedHash": "8e3c24a158ceee8694043b47805637e355988e383417e483fee813b3f174bffb"
+    }
+  }
+}

@@ -6,17 +6,8 @@ pipeline {
         skipDefaultCheckout(false)
     }
 
-    parameters {
-        string(
-            name: 'PATIENT_CREDENTIALS_ID',
-            defaultValue: 'mkty-patient',
-            description: 'Jenkins Username/password credential ID for the patient test account.'
-        )
-        string(
-            name: 'DOCTOR_CREDENTIALS_ID',
-            defaultValue: 'mkty-doctor',
-            description: 'Jenkins Username/password credential ID for the doctor test account.'
-        )
+    environment {
+        PYTHON_PATH = '.venv\\Scripts\\python.exe'
     }
 
     stages {
@@ -28,36 +19,40 @@ pipeline {
                     }
 
                     def pythonPath = "${env.WORKSPACE}\\.venv\\Scripts\\python.exe"
+
                     if (!fileExists(pythonPath)) {
-                        powershell(
-                            label: 'Create project virtual environment',
+                        bat(
+                            label: 'Create project virtual environment and install dependencies',
                             script: '''
-$ErrorActionPreference = 'Stop'
-$venvPython = Join-Path $env:WORKSPACE '.venv\\Scripts\\python.exe'
-if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
-    $systemPython = Get-Command python -CommandType Application -ErrorAction SilentlyContinue
-    if ($null -eq $systemPython) {
-        throw 'Python was not found on the Jenkins Windows agent; install Python 3.11+ first.'
-    }
-    & $systemPython.Source -m venv (Join-Path $env:WORKSPACE '.venv')
-    $venvExitCode = [int]$LASTEXITCODE
-    if ($venvExitCode -ne 0) {
-        exit $venvExitCode
-    }
-    & $venvPython -m pip install -r (Join-Path $env:WORKSPACE 'requirements.txt')
-    $pipExitCode = [int]$LASTEXITCODE
-    if ($pipExitCode -ne 0) {
-        exit $pipExitCode
-    }
-}
+@echo off
+setlocal
+
+where python >nul 2>nul
+if errorlevel 1 (
+    echo Python was not found on the Jenkins Windows agent.
+    echo Install Python 3.11 or newer and ensure it is on PATH.
+    endlocal & exit /b 1
+)
+
+python -m venv "%WORKSPACE%\\.venv"
+if errorlevel 1 exit /b 1
+
+"%WORKSPACE%\\.venv\\Scripts\\python.exe" -m pip install -r "%WORKSPACE%\\requirements.txt"
+if errorlevel 1 exit /b 1
+
+endlocal
 '''
                         )
                     } else {
                         echo 'Reusing existing project virtual environment.'
                     }
 
-                    if (!fileExists("${env.WORKSPACE}\\scripts\\run_readonly_regression.ps1")) {
-                        error('scripts/run_readonly_regression.ps1 was not found in the workspace.')
+                    if (!fileExists("${env.WORKSPACE}\\scripts\\run_readonly_regression.py")) {
+                        error('scripts/run_readonly_regression.py was not found in the workspace.')
+                    }
+
+                    if (!fileExists("${env.WORKSPACE}\\requirements.txt")) {
+                        error('requirements.txt was not found in the workspace.')
                     }
                 }
             }
@@ -66,28 +61,42 @@ if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
         stage('Run read-only regression') {
             steps {
                 script {
-                    env.READONLY_RUN_STARTED_UTC = powershell(
-                        returnStdout: true,
-                        script: "[DateTime]::UtcNow.ToString('o')"
-                    ).trim()
+                    env.READONLY_REPORT_RUN_ID =
+                        "${new Date().format('yyyyMMdd_HHmmss', TimeZone.getTimeZone('Asia/Shanghai'))}-${UUID.randomUUID().toString().replace('-', '')}"
+
+                    if (!(env.READONLY_REPORT_RUN_ID ==~ /[0-9]{8}_[0-9]{6}-[a-f0-9]{32}/)) {
+                        error('Invalid read-only report run ID.')
+                    }
+
                     withCredentials([
                         usernamePassword(
-                            credentialsId: params.PATIENT_CREDENTIALS_ID,
+                            credentialsId: 'mkty-patient',
                             usernameVariable: 'MKTY_UI_TEST_USERNAME',
                             passwordVariable: 'MKTY_UI_TEST_PASSWORD'
                         ),
                         usernamePassword(
-                            credentialsId: params.DOCTOR_CREDENTIALS_ID,
+                            credentialsId: 'mkty-doctor',
                             usernameVariable: 'MKTY_DOCTOR_USERNAME',
                             passwordVariable: 'MKTY_DOCTOR_PASSWORD'
                         )
                     ]) {
-                        powershell(
+                        bat(
                             label: 'Run unified read-only regression',
                             script: '''
-$ErrorActionPreference = 'Stop'
-$scriptPath = Join-Path $env:WORKSPACE 'scripts\\run_readonly_regression.ps1'
-& $scriptPath
+@echo off
+setlocal
+
+set "PYTHON=%WORKSPACE%\\.venv\\Scripts\\python.exe"
+
+if not exist "%PYTHON%" (
+    echo Project virtual-environment Python was not found.
+    endlocal & exit /b 2
+)
+
+"%PYTHON%" "%WORKSPACE%\\scripts\\run_readonly_regression.py" --ci --report-run-id "%READONLY_REPORT_RUN_ID%"
+set "REGRESSION_EXIT_CODE=%ERRORLEVEL%"
+
+endlocal & exit /b %REGRESSION_EXIT_CODE%
 '''
                         )
                     }
@@ -98,73 +107,61 @@ $scriptPath = Join-Path $env:WORKSPACE 'scripts\\run_readonly_regression.ps1'
 
     post {
         always {
-            archiveArtifacts(
-                artifacts: 'artifacts/**',
-                allowEmptyArchive: true,
-                fingerprint: false
-            )
-
             script {
-                def latestJunitPath = powershell(
-                    returnStdout: true,
-                    script: '''
-$startText = $env:READONLY_RUN_STARTED_UTC
-if ([string]::IsNullOrWhiteSpace($startText)) { exit 0 }
-$start = $null
-if (-not [DateTime]::TryParse($startText, [ref]$start)) { exit 0 }
-$start = $start.ToUniversalTime()
-$dir = Get-ChildItem -LiteralPath (Join-Path $env:WORKSPACE 'artifacts') -Directory -Filter 'junit-readonly-regression-*' -ErrorAction SilentlyContinue |
-    Where-Object { $_.LastWriteTimeUtc -ge $start } |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 1
-if ($null -ne $dir) {
-    $file = Join-Path $dir.FullName 'junit.xml'
-    if (Test-Path -LiteralPath $file -PathType Leaf) {
-        Write-Output ("artifacts/{0}/junit.xml" -f $dir.Name)
-    }
-}
-'''
-                ).trim()
-                if ([string]::IsNullOrWhiteSpace(latestJunitPath)) {
-                    echo 'No current read-only JUnit XML report was found; archived artifacts remain available.'
-                } else {
-                    junit(
-                        testResults: latestJunitPath,
-                        allowEmptyResults: true,
-                        skipPublishingChecks: true
-                    )
-                }
+                def runId = env.READONLY_REPORT_RUN_ID
 
-                def latestAllurePath = powershell(
-                    returnStdout: true,
-                    script: '''
-$startText = $env:READONLY_RUN_STARTED_UTC
-if ([string]::IsNullOrWhiteSpace($startText)) { exit 0 }
-$start = $null
-if (-not [DateTime]::TryParse($startText, [ref]$start)) { exit 0 }
-$start = $start.ToUniversalTime()
-$dir = Get-ChildItem -LiteralPath (Join-Path $env:WORKSPACE 'artifacts') -Directory -Filter 'allure-results-readonly-regression-*' -ErrorAction SilentlyContinue |
-    Where-Object { $_.LastWriteTimeUtc -ge $start } |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 1
-if ($null -ne $dir) {
-    Write-Output ("artifacts/{0}" -f $dir.Name)
-}
-'''
-                ).trim()
-                if ([string]::IsNullOrWhiteSpace(latestAllurePath)) {
-                    echo 'No read-only Allure raw-results directory was found; archived artifacts remain available.'
+                if (!runId?.trim()) {
+                    echo 'Regression did not start; no current report directories were allocated.'
+                } else if (!(runId ==~ /[0-9]{8}_[0-9]{6}-[a-f0-9]{32}/)) {
+                    currentBuild.result = 'FAILURE'
+                    echo 'Invalid report run ID; refusing to select artifacts.'
                 } else {
+                    def junitDirectory = "artifacts/junit-readonly-regression-${runId}"
+                    def allureDirectory = "artifacts/allure-results-readonly-regression-${runId}"
+                    def htmlDirectory = "artifacts/allure-report-readonly-regression-${runId}"
+
                     try {
-                        // The Allure Jenkins plugin is optional. Keep artifact archival independent of it.
-                        allure([
-                            includeProperties: false,
-                            jdk: '',
-                            results: [[path: latestAllurePath]]
-                        ])
-                    } catch (Throwable pluginError) {
-                        echo "Allure Jenkins plugin is unavailable or failed: ${pluginError.message}"
-                        echo 'Install/configure the Allure Jenkins plugin to publish the archived raw results in Jenkins.'
+                        archiveArtifacts(
+                            artifacts: "${junitDirectory}/**,${allureDirectory}/**,${htmlDirectory}/**",
+                            allowEmptyArchive: true,
+                            fingerprint: false
+                        )
+                    } catch (Exception archiveError) {
+                        currentBuild.result = 'FAILURE'
+                        echo "Report artifact archival failed: ${archiveError}"
+                    }
+
+                    def junitPath = "${junitDirectory}/junit.xml"
+
+                    try {
+                        if (fileExists(junitPath)) {
+                            junit(
+                                testResults: junitPath,
+                                allowEmptyResults: false,
+                                skipPublishingChecks: true
+                            )
+                        } else {
+                            currentBuild.result = 'FAILURE'
+                            echo 'No current read-only JUnit XML report was found.'
+                        }
+                    } catch (Exception junitError) {
+                        currentBuild.result = 'FAILURE'
+                        echo "JUnit report publication failed: ${junitError}"
+                    }
+
+                    if (fileExists("${htmlDirectory}/index.html")) {
+                        echo "Allure HTML report archived: ${htmlDirectory}/index.html"
+                        echo 'Open the Jenkins build page and use the archived artifacts to view the Allure report.'
+                    } else {
+                        currentBuild.result = 'FAILURE'
+                        echo 'No current read-only Allure HTML report was found.'
+                    }
+
+                    if (fileExists(allureDirectory)) {
+                        echo "Allure raw results archived: ${allureDirectory}"
+                    } else {
+                        currentBuild.result = 'FAILURE'
+                        echo 'No current read-only Allure raw-results directory was found.'
                     }
                 }
             }

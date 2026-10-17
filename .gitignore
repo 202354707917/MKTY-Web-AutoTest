@@ -9,3 +9,5 @@ allure-results/
 allure-report/
 .env
 .env.*
+# Local Allure CLI distribution
+tools/allure/
