@@ -156,6 +156,23 @@ endlocal & exit /b %REGRESSION_EXIT_CODE%
                         currentBuild.result = 'FAILURE'
                         echo 'No current read-only Allure HTML report was found.'
                     }
+                       try {
+                        if (fileExists(allureDirectory)) {
+                            allure(
+                                includeProperties: false,
+                                jdk: '',
+                                results: [[path: allureDirectory]],
+                                reportBuildPolicy: 'ALWAYS',
+                                commandline: 'Allure-2.46.1'
+                            )
+                        } else {
+                            currentBuild.result = 'FAILURE'
+                            echo 'No current Allure results found; cannot publish the Allure report.'
+                        }
+                    } catch (Exception allureError) {
+                        currentBuild.result = 'FAILURE'
+                        echo "Allure report publication failed: ${allureError}"
+                    }
 
                     if (fileExists(allureDirectory)) {
                         echo "Allure raw results archived: ${allureDirectory}"
